@@ -1,0 +1,8 @@
+# 升级 cpp.yml 里固定了 SHA 的 Action。扫描器镜像 (gitleaks、semgrep) 写在 env 里，Dependabot 认不出，需要手动升级
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      actions: { patterns: ['*'] }

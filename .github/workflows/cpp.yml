@@ -1,0 +1,163 @@
+# 可复用的 C++ DevSecOps 流水线 (reusable workflow)
+#
+# 各项目仓库这样调用 (固定到本仓库的某个 commit):
+#   jobs:
+#     devsecops:
+#       uses: hwang-protocol/devsecops-pipelines/.github/workflows/cpp.yml@<SHA>
+#       permissions: { contents: read, security-events: write }
+#       with:
+#         apt-packages: libsqlite3-dev
+#
+# 对项目仓库的约定 (golden path):
+#   - 根目录有 CMakeLists.txt，测试用 ctest 注册
+#   - 可选: 根目录放 .gitleaks.toml / .semgrepignore 覆盖默认规则
+#
+#   secrets ─┐
+#   sast ────┤ 并行
+#   codeql ──┤
+#   test ────┘ (release / ASan+UBSan / TSan 三种构建)
+name: cpp-devsecops
+
+on:
+  workflow_call:
+    inputs:
+      apt-packages:
+        description: 额外的 apt 包 (空格分隔)，例如 libsqlite3-dev
+        type: string
+        default: ''
+      cmake-args:
+        description: 额外的 cmake 配置参数
+        type: string
+        default: ''
+      python:
+        description: 仓库里有 Python 脚本时设为 true，CodeQL 和 Semgrep 会一起扫
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_IMAGE: zricethezav/gitleaks:v8.21.2
+  SEMGREP_IMAGE: semgrep/semgrep:1.99.0
+  CXX: clang++-18          # ubuntu-24.04 runner 自带
+
+jobs:
+  # ---------- 密钥泄露 ----------
+  secrets:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0               # 扫完整 git 历史
+          persist-credentials: false
+      - name: gitleaks
+        run: |
+          docker run --rm -v "$PWD":/repo -w /repo --entrypoint sh "$GITLEAKS_IMAGE" -c \
+            'git config --global --add safe.directory /repo &&
+             gitleaks detect -s /repo --redact --no-banner \
+               --report-format sarif --report-path /repo/gitleaks.sarif'
+      - uses: github/codeql-action/upload-sarif@df409f7d9260372bd5f19e5b04e83cb3c43714ae # v3.27.9
+        if: always()
+        with: { sarif_file: gitleaks.sarif, category: gitleaks }
+
+  # ---------- SAST: Semgrep (快) ----------
+  sast:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: { persist-credentials: false }
+      - name: semgrep
+        env:
+          PY_RULES: ${{ inputs.python && '--config p/python' || '' }}
+        run: |
+          # shellcheck disable=SC2086  # PY_RULES 为空时要展开成 0 个参数
+          docker run --rm -v "$PWD":/src -w /src "$SEMGREP_IMAGE" semgrep scan \
+            --config p/c --config p/github-actions $PY_RULES \
+            --metrics=off --error --sarif --output semgrep.sarif
+      - uses: github/codeql-action/upload-sarif@df409f7d9260372bd5f19e5b04e83cb3c43714ae # v3.27.9
+        if: always()
+        with: { sarif_file: semgrep.sarif, category: semgrep }
+
+  # ---------- SAST: CodeQL (数据流分析) ----------
+  codeql:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON(inputs.python && '["c-cpp","actions","python"]' || '["c-cpp","actions"]') }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: { persist-credentials: false }
+      - name: install packages
+        if: matrix.language == 'c-cpp' && inputs.apt-packages != ''
+        env: { PKGS: '${{ inputs.apt-packages }}' }
+        run: |
+          sudo apt-get update -q
+          # shellcheck disable=SC2086
+          sudo apt-get install -y -q $PKGS
+      - uses: github/codeql-action/init@df409f7d9260372bd5f19e5b04e83cb3c43714ae # v3.27.9
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.language == 'c-cpp' && 'manual' || 'none' }}
+          queries: security-extended
+      - name: build (C++ 需要真实编译)
+        if: matrix.language == 'c-cpp'
+        env: { CMAKE_ARGS: '${{ inputs.cmake-args }}' }
+        run: |
+          # shellcheck disable=SC2086
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug $CMAKE_ARGS
+          cmake --build build -j
+      - uses: github/codeql-action/analyze@df409f7d9260372bd5f19e5b04e83cb3c43714ae # v3.27.9
+        with: { category: '/language:${{ matrix.language }}' }
+
+  # ---------- 测试: 普通 / ASan+UBSan / TSan ----------
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [none, address, thread]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: { persist-credentials: false }
+      - name: install packages
+        # libclang-rt-18-dev: ASan/TSan 的运行时库，Ubuntu 默认不随 clang 安装
+        env: { PKGS: '${{ inputs.apt-packages }}' }
+        run: |
+          sudo apt-get update -q
+          # shellcheck disable=SC2086
+          sudo apt-get install -y -q libclang-rt-18-dev $PKGS
+          # llvm-symbolizer：sanitizer 报错时把地址翻译成 文件:行号
+          echo /usr/lib/llvm-18/bin >> "$GITHUB_PATH"
+      - name: TSan 需要降低 ASLR 随机位数
+        # Ubuntu 24.04 的内核默认 mmap_rnd_bits=32，clang-18 的 TSan 会报
+        # "unexpected memory mapping" 直接退出
+        if: matrix.sanitizer == 'thread'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: build & test
+        env:
+          SAN: ${{ matrix.sanitizer }}
+          CMAKE_ARGS: ${{ inputs.cmake-args }}
+        run: |
+          case "$SAN" in
+            address) FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer" ;;
+            thread)  FLAGS="-fsanitize=thread" ;;
+            *)       FLAGS="" ;;
+          esac
+          # shellcheck disable=SC2086
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS="$FLAGS" \
+            -DCMAKE_EXE_LINKER_FLAGS="$FLAGS" \
+            $CMAKE_ARGS
+          cmake --build build -j
+          ctest --test-dir build --output-on-failure
