@@ -12,6 +12,13 @@
 #   - 根目录有 CMakeLists.txt，测试用 ctest 注册
 #   - 可选: 根目录放 .gitleaks.toml / .semgrepignore 覆盖默认规则
 #
+# 公开仓库 vs 私有仓库 (扫描报告放哪里):
+#   - 公开仓库: SARIF 上传到 GitHub 的 Code scanning (Security 页面能看到每条告警)
+#   - 私有仓库: Code scanning 需要付费的 GitHub Advanced Security，上传会报
+#     "Resource not accessible by integration"。所以私有仓库不上传，改为把 SARIF 存成
+#     这次运行的产物 (Actions 页面 → 这次运行 → Artifacts 下载)，有问题照样让 CI 失败
+#   - 判断条件: github.event.repository.private (被调用时，github 上下文是调用方仓库的)
+#
 #   secrets ─┐
 #   sast ────┤ 并行
 #   codeql ──┤
@@ -60,9 +67,14 @@ jobs:
             'git config --global --add safe.directory /repo &&
              gitleaks detect -s /repo --redact --no-banner \
                --report-format sarif --report-path /repo/gitleaks.sarif'
+      # 公开仓库: 上传到 Code scanning
       - uses: github/codeql-action/upload-sarif@df409f7d9260372bd5f19e5b04e83cb3c43714ae # v3.27.9
-        if: always()
+        if: always() && !github.event.repository.private
         with: { sarif_file: gitleaks.sarif, category: gitleaks }
+      # 私有仓库: 存成产物 (上一步有发现时 gitleaks 退出码非 0，job 已经失败；always() 保证报告照样保存)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && github.event.repository.private
+        with: { name: gitleaks-sarif, path: gitleaks.sarif, if-no-files-found: warn }
 
   # ---------- SAST: Semgrep (快) ----------
   sast:
@@ -81,9 +93,14 @@ jobs:
           docker run --rm -v "$PWD":/src -w /src "$SEMGREP_IMAGE" semgrep scan \
             --config p/c --config p/github-actions $PY_RULES \
             --metrics=off --error --sarif --output semgrep.sarif
+      # 公开仓库: 上传到 Code scanning
       - uses: github/codeql-action/upload-sarif@df409f7d9260372bd5f19e5b04e83cb3c43714ae # v3.27.9
-        if: always()
+        if: always() && !github.event.repository.private
         with: { sarif_file: semgrep.sarif, category: semgrep }
+      # 私有仓库: 存成产物 (上一步有发现时 semgrep 退出码非 0，job 已经失败；always() 保证报告照样保存)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && github.event.repository.private
+        with: { name: semgrep-sarif, path: semgrep.sarif, if-no-files-found: warn }
 
   # ---------- SAST: CodeQL (数据流分析) ----------
   codeql:
@@ -118,7 +135,27 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug $CMAKE_ARGS
           cmake --build build -j
       - uses: github/codeql-action/analyze@df409f7d9260372bd5f19e5b04e83cb3c43714ae # v3.27.9
-        with: { category: '/language:${{ matrix.language }}' }
+        with:
+          category: '/language:${{ matrix.language }}'
+          # 私有仓库不上传 (见文件开头的说明)，SARIF 写到 codeql-results/ 目录
+          upload: ${{ github.event.repository.private && 'never' || 'always' }}
+          output: codeql-results
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && github.event.repository.private
+        with: { name: 'codeql-${{ matrix.language }}-sarif', path: codeql-results, if-no-files-found: warn }
+      - name: '私有仓库: 有发现就让 CI 失败'
+        # 公开仓库的发现在 Security 页面里分级处理 (告警，不挡合并)；
+        # 私有仓库没有那个页面，CI 失败是唯一能让人看到问题的信号
+        if: github.event.repository.private
+        run: |
+          # 每个 SARIF 文件: runs[].results[] 就是一条条发现；统计总数
+          n=$(jq -s '[.[].runs[].results[]] | length' codeql-results/*.sarif)   # -s: 把所有文件读成一个数组
+          echo "CodeQL findings: $n"
+          if [ "$n" -gt 0 ]; then
+            # 打印每条发现: 规则 id、文件:行号、说明，方便直接在日志里看
+            jq -r '.runs[].results[] | "\(.ruleId)  \(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine)  \(.message.text)"' codeql-results/*.sarif
+            exit 1
+          fi
 
   # ---------- 测试: 普通 / ASan+UBSan / TSan ----------
   test:
