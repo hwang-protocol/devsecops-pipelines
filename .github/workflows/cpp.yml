@@ -68,7 +68,7 @@ jobs:
              gitleaks detect -s /repo --redact --no-banner \
                --report-format sarif --report-path /repo/gitleaks.sarif'
       # 公开仓库: 上传到 Code scanning
-      - uses: github/codeql-action/upload-sarif@df409f7d9260372bd5f19e5b04e83cb3c43714ae # v3.27.9
+      - uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         if: always() && !github.event.repository.private
         with: { sarif_file: gitleaks.sarif, category: gitleaks }
       # 私有仓库: 存成产物 (上一步有发现时 gitleaks 退出码非 0，job 已经失败；always() 保证报告照样保存)
@@ -94,7 +94,7 @@ jobs:
             --config p/c --config p/github-actions $PY_RULES \
             --metrics=off --error --sarif --output semgrep.sarif
       # 公开仓库: 上传到 Code scanning
-      - uses: github/codeql-action/upload-sarif@df409f7d9260372bd5f19e5b04e83cb3c43714ae # v3.27.9
+      - uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         if: always() && !github.event.repository.private
         with: { sarif_file: semgrep.sarif, category: semgrep }
       # 私有仓库: 存成产物 (上一步有发现时 semgrep 退出码非 0，job 已经失败；always() 保证报告照样保存)
@@ -122,7 +122,7 @@ jobs:
           sudo apt-get update -q
           # shellcheck disable=SC2086
           sudo apt-get install -y -q $PKGS
-      - uses: github/codeql-action/init@df409f7d9260372bd5f19e5b04e83cb3c43714ae # v3.27.9
+      - uses: github/codeql-action/init@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.language == 'c-cpp' && 'manual' || 'none' }}
@@ -134,7 +134,7 @@ jobs:
           # shellcheck disable=SC2086
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug $CMAKE_ARGS
           cmake --build build -j
-      - uses: github/codeql-action/analyze@df409f7d9260372bd5f19e5b04e83cb3c43714ae # v3.27.9
+      - uses: github/codeql-action/analyze@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           category: '/language:${{ matrix.language }}'
           # 私有仓库不上传 (见文件开头的说明)，SARIF 写到 codeql-results/ 目录
