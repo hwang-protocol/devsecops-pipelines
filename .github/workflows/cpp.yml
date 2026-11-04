@@ -4,7 +4,7 @@
 #   jobs:
 #     devsecops:
 #       uses: hwang-protocol/devsecops-pipelines/.github/workflows/cpp.yml@<SHA>
-#       permissions: { contents: read, security-events: write }
+#       permissions: { contents: read, security-events: write, actions: read }
 #       with:
 #         apt-packages: libsqlite3-dev
 #
@@ -108,6 +108,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      actions: read            # codeql-action v4 会读取本次 workflow run 的信息；私有仓库必须显式授权
     strategy:
       fail-fast: false
       matrix:
